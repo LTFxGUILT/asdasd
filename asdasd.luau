@@ -1,10 +1,3 @@
---========================================================--
--- Moe - Full Script using Original Modules + Limb Extender
---========================================================--
-
---!native
---!optimize 2
-
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -74,7 +67,7 @@ pcall(function()
 end)
 
 --========================================================--
--- STATE (your Zex features)
+-- STATE
 --========================================================--
 
 local noFallEnabled = false
@@ -336,7 +329,7 @@ ChamsBox:AddToggle("SimpleChams", {
 })
 
 --========================================================--
--- ESP (your existing ESP)
+-- ESP
 --========================================================--
 
 local function RemoveESP(player)
@@ -739,7 +732,7 @@ WaifuDep:AddSlider("visuals/camera/waifu/scale", { Text = "Scale", Min = 0, Max 
 WaifuDep:SetupDependencies({ { Toggles["visuals/camera/waifu"], true } })
 
 --========================================================--
--- MISC TAB (original structure)
+-- MISC TAB
 --========================================================--
 
 local Movement = Tabs.Misc:AddGroupbox({ Side = 1, Name = "Movement" })
@@ -882,7 +875,7 @@ local function UpdateChams()
 end
 
 --========================================================--
--- MAIN LOOP (runs original modules + your features)
+-- MAIN LOOP
 --========================================================--
 
 RunService.Heartbeat:Connect(function(dt)
