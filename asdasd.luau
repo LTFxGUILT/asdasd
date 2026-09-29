@@ -130,6 +130,24 @@ pcall(function()
 
 end)
 
+-- Fishing publishes its registry under __Testing.Fishing, so a re-run has to
+-- stop the previous loop before the new one starts. Without this the old
+-- RunService connection and the old Tick wrapper both stay alive, which is how
+-- earlier test runs ended up with stacked wrappers and no measurable effect.
+pcall(function()
+
+    local fishing = getgenv().__Testing.Fishing
+
+    if fishing and fishing.stop then
+
+        fishing.stop()
+
+    end
+
+    getgenv().__Testing.Fishing = nil
+
+end)
+
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 
@@ -235,11 +253,14 @@ local IsBugFixes = PlaceId == 100971017807798
 
 local IsWarTycoon = PlaceId == 4639625707
 
-local IsCreaturesOfSonaria = PlaceId == 5233782396
+local IsCreaturesOfSonaria = PlaceId == 5233782396 or PlaceId == 136015760267602
 
 local IsTradeRealm = PlaceId == 14119723130
 
-local IsSupported = IsBugFixes or IsWarTycoon or IsCreaturesOfSonaria or IsTradeRealm
+-- No local on purpose, see the note above PlaceName. Read inline instead.
+local FISHS = 5750914919
+
+local IsSupported = IsBugFixes or IsWarTycoon or IsCreaturesOfSonaria or IsTradeRealm or game.GameId == FISHS
 
 local SKYBOX_URL = "https://raw.githubusercontent.com/LTFxGUILT/asdasd/refs/heads/main/skyboxes.luau"
 
@@ -2806,7 +2827,7 @@ elseif IsWarTycoon then
                 local metal = parts:FindFirstChild("Metal")
                 if metal and metal:IsA("BasePart") then return metal, "Metal" end
                 local base = parts:FindFirstChildWhichIsA("BasePart", true)
-                if base then return base, base.Name end
+                if base then return nil, base.Name end
                 return nil, "no part"
             end
 
@@ -3099,6 +3120,53 @@ elseif IsTradeRealm then
         warn("[Testing] Trade Realm module failed to load — upload modules/trade_realm.luau to the repo")
     end
 
+elseif game.GameId == FISHS then
+
+    GameInfo:AddLabel("Status : Supported")
+    GameInfo:AddLabel("Game Mods : Fishing")
+    GameInfo:AddLabel("Game : " .. tostring(game.GameId))
+
+    -- Loaded through the same LoadModule helper as the other game modules, so
+    -- it picks up the shared cache and the same failure warning. Until the file
+    -- is uploaded the helper returns nil and only the warn below fires, which
+    -- is why the branch is written to survive that rather than assume success.
+    local setupFishing = LoadModule("https://raw.githubusercontent.com/LTFxGUILT/asdasd/refs/heads/main/Fishing/fishing.luau")
+
+    if type(setupFishing) == "function" then
+
+        task.spawn(function()
+
+            local ok, err = pcall(setupFishing, {
+                Tabs = Tabs,
+                Toggles = Toggles,
+                Library = Library,
+                ThemeManager = ThemeManager,
+                AddToggle = AddToggle,
+                GameInfo = GameInfo,
+                Players = Players,
+                LocalPlayer = LocalPlayer,
+                RunService = RunService,
+                ReplicatedStorage = ReplicatedStorage,
+                Workspace = Workspace,
+                CoreGui = CoreGui,
+                UserInputService = UserInputService,
+                CollectionService = CollectionService,
+                PlaceId = PlaceId,
+                GameId = game.GameId,
+                PlaceName = PlaceName,
+                getRoot = getRoot,
+            })
+
+            if not ok then
+                warn("[Testing] Fishing module error:", err)
+            end
+
+        end)
+
+    else
+        warn("[Testing] Fishing module failed to load — upload Fishing/fishing.luau to the repo")
+    end
+
 else
 
     GameInfo:AddLabel("Status : Not Supported")
@@ -3205,7 +3273,7 @@ local function UpdateChams()
 
     if not chamsEnabled then
 
-        for _, hl in pairs(ChamObjects) do if hl then pcall(function() hl:Destroy() end) end end
+        for _, hl in pairs(ChamObjects) do if hl then hl:Destroy() end end
 
         ChamObjects = {}
 
@@ -3429,6 +3497,20 @@ getgenv().__Testing.Body = function()
     if antiAfkConnection then antiAfkConnection:Disconnect() end
 
     if movementCharacterConnection then movementCharacterConnection:Disconnect() end
+
+    -- Runs on Library unload as well as on re-execute, so the fishing loop and
+    -- its Tick wrapper come down here too. Stopping only at the top of the file
+    -- would leave both alive whenever the menu is closed instead of re-run.
+    pcall(function()
+        local fishing = getgenv().__Testing.Fishing
+
+        if fishing and fishing.stop then
+
+            fishing.stop()
+            getgenv().__Testing.Fishing = nil
+
+        end
+    end)
 
     pcall(function()
         if miscMovementState.humanoid then
