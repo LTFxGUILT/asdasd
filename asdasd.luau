@@ -358,6 +358,10 @@ local noFallEnabled, cframeEnabled, lockFOV = false, false, false
 
 local rainbowBody, rainbowGun, infiniteAmmo = false, false, false
 
+-- Ammo capacity lives up here so the War Tycoon tab can drive it before the
+-- implementation further down is defined.
+local ammoCapacity, applyInfiniteAmmo, restoreAmmoCapacity = 9999, nil, nil
+
 local headExpandEnabled, quickInteract, chamsEnabled = false, false, false
 
 local cframeSpeed, currentFOV, headSize = 50, 70, 5
@@ -2779,8 +2783,24 @@ elseif IsWarTycoon then
             WarBox:AddToggle("InfiniteAmmo", {
                 Text = "Infinite Ammo",
                 Default = false,
-                Callback = function(v) infiniteAmmo = v end,
+                Callback = function(v)
+                    infiniteAmmo = v
+                    if applyInfiniteAmmo then applyInfiniteAmmo(v) end
+                end,
             })
+            WarBox:AddSlider("WarInfAmmoCount", {
+                Text = "Mag Capacity",
+                Min = 100,
+                Max = 99999,
+                Default = 9999,
+                Rounding = 0,
+                Callback = function(v)
+                    if type(v) ~= "number" or v < 1 then return end
+                    ammoCapacity = math.floor(v)
+                    if infiniteAmmo and applyInfiniteAmmo then applyInfiniteAmmo(true) end
+                end,
+            })
+            WarBox:AddLabel("Fills the mag when you reload.")
             local CashBox = Tabs.GameMods:AddRightGroupbox("Auto Cash")
             W.autoCash = false
             W.autoCashUsePass = true
@@ -3217,21 +3237,278 @@ markKnownInventory()
 
 refreshTrackerUI()
 
-local function forceAmmo()
+-- Infinite ammo, driven by the reload instead of a per-frame write.
+--
+-- The old version rewrote every gun's Ammo NumberValue to 999 on each
+-- RenderStepped tick. That number is the magazine capacity: ACS_Guns.<gun>.Settings
+-- returns Ammo = script.Parent.Ammo.Value, so pinning it at 999 replaced every
+-- gun's real mag size for the whole session. The four shell-reload guns
+-- (ReloadType 2: KSG 12, Remington 870, SPAS-12, Lil Pump Shotgun) reload one
+-- shell per loop iteration counted from capacity, so 999 capacity put them in a
+-- 999-iteration insert loop that never finishes.
+--
+-- This version writes capacity once and lets ACS refill the mag on reload, which
+-- is the reload behaviour this was always supposed to be. ReloadType 2 guns are
+-- deliberately left at their real capacity. Restore puts the server values back.
 
-    if not IsWarTycoon and not IsBugFixes then return end
+local ammoGuns = nil
+local ammoOriginals = {}
+local ammoReloadTypes = {}
+local ammoWatches = {}
+local ammoCharacterConnection = nil
+local ammoCharacterAddedConnection = nil
+
+local function ammoFolder()
+
+    if ammoGuns and ammoGuns.Parent then return ammoGuns end
 
     local configurations = ReplicatedStorage:FindFirstChild("Configurations")
 
-    local acsGuns = configurations and configurations:FindFirstChild("ACS_Guns")
+    ammoGuns = configurations and configurations:FindFirstChild("ACS_Guns")
 
-    if not acsGuns then return end
+    return ammoGuns
 
-    for _, folder in ipairs(acsGuns:GetChildren()) do
+end
 
-        local ammo = folder:FindFirstChild("Ammo")
+local function ammoGunValue(folder)
 
-        if ammo then pcall(function() ammo.Value = 999 end) end
+    local value = folder:FindFirstChild("Ammo")
+
+    if value and value:IsA("NumberValue") then return value end
+
+    return nil
+
+end
+
+local function ammoGunReloadType(folder)
+
+    local cached = ammoReloadTypes[folder]
+
+    if cached then return cached end
+
+    local settings = folder:FindFirstChild("Settings")
+
+    local reloadType = 1
+
+    if settings and settings:IsA("ModuleScript") then
+
+        local ok, module = pcall(require, settings)
+
+        if ok and type(module) == "table" and type(module.ReloadType) == "number" then
+
+            reloadType = module.ReloadType
+
+        end
+
+    end
+
+    ammoReloadTypes[folder] = reloadType
+
+    return reloadType
+
+end
+
+-- Nil means "leave this gun alone": shell-reload guns keep whatever the server
+-- says, otherwise their insert loop runs once per point of capacity.
+local function ammoGunTarget(folder)
+
+    if ammoGunReloadType(folder) == 2 then return ammoOriginals[folder] end
+
+    return ammoCapacity
+
+end
+
+local function ammoWriteCapacity(folder)
+
+    local value = ammoGunValue(folder)
+
+    if not value then return end
+
+    if ammoOriginals[folder] == nil then ammoOriginals[folder] = value.Value end
+
+    local target = ammoGunTarget(folder)
+
+    if target ~= nil and value.Value ~= target then
+
+        pcall(function() value.Value = target end)
+
+    end
+
+end
+
+local function ammoWatchGun(folder)
+
+    local value = ammoGunValue(folder)
+
+    if not value or ammoWatches[folder] then return end
+
+    ammoWatches[folder] = value:GetPropertyChangedSignal("Value"):Connect(function()
+
+        if not infiniteAmmo then return end
+
+        local target = ammoGunTarget(folder)
+
+        if target ~= nil and value.Value ~= target then
+
+            pcall(function() value.Value = target end)
+
+        end
+
+    end)
+
+end
+
+local function ammoRestoreGun(folder)
+
+    local watch = ammoWatches[folder]
+
+    if watch then
+
+        watch:Disconnect()
+
+        ammoWatches[folder] = nil
+
+    end
+
+    local value = ammoGunValue(folder)
+
+    local original = ammoOriginals[folder]
+
+    if value and original ~= nil and value.Value ~= original then
+
+        pcall(function() value.Value = original end)
+
+    end
+
+end
+
+-- The tool's Ammo attribute beats the cached Settings table in every reload path
+-- (ACS_Client reads tool:GetAttribute("Ammo") or settings.Ammo at reload time),
+-- so tagging the equipped tool is what makes the very next reload fill to
+-- capacity even though the Settings module was already required and cached.
+local function ammoTagTool(tool)
+
+    if not infiniteAmmo or not tool:IsA("Tool") then return end
+
+    local folder = ammoFolder()
+
+    local gun = folder and folder:FindFirstChild(tool.Name)
+
+    if not gun then return end
+
+    if ammoGunReloadType(gun) == 2 then return end
+
+    if tool:GetAttribute("Ammo") ~= ammoCapacity then
+
+        pcall(function() tool:SetAttribute("Ammo", ammoCapacity) end)
+
+    end
+
+end
+
+local function ammoHookCharacter()
+
+    if ammoCharacterConnection then ammoCharacterConnection:Disconnect() end
+
+    ammoCharacterConnection = nil
+
+    local character = LocalPlayer.Character
+
+    if not character then return end
+
+    for _, child in ipairs(character:GetChildren()) do ammoTagTool(child) end
+
+    ammoCharacterConnection = character.ChildAdded:Connect(ammoTagTool)
+
+end
+
+restoreAmmoCapacity = function()
+
+    infiniteAmmo = false
+
+    for folder in pairs(ammoOriginals) do ammoRestoreGun(folder) end
+
+    for folder in pairs(ammoWatches) do ammoRestoreGun(folder) end
+
+    if ammoCharacterConnection then
+
+        ammoCharacterConnection:Disconnect()
+
+        ammoCharacterConnection = nil
+
+    end
+
+    if ammoCharacterAddedConnection then
+
+        ammoCharacterAddedConnection:Disconnect()
+
+        ammoCharacterAddedConnection = nil
+
+    end
+
+    local character = LocalPlayer.Character
+
+    if character then
+
+        for _, tool in ipairs(character:GetChildren()) do
+
+            if tool:IsA("Tool") and tool:GetAttribute("Ammo") == ammoCapacity then
+
+                pcall(function() tool:SetAttribute("Ammo", nil) end)
+
+            end
+
+        end
+
+    end
+
+end
+
+applyInfiniteAmmo = function(on)
+
+    if not (IsWarTycoon or IsBugFixes) then return end
+
+    if not on then
+
+        restoreAmmoCapacity()
+
+        return
+
+    end
+
+    local folder = ammoFolder()
+
+    if not folder then
+
+        infiniteAmmo = false
+
+        return
+
+    end
+
+    infiniteAmmo = true
+
+    for _, gun in ipairs(folder:GetChildren()) do
+
+        if gun:IsA("Folder") then
+
+            ammoWriteCapacity(gun)
+
+            ammoWatchGun(gun)
+
+        end
+
+    end
+
+    ammoHookCharacter()
+
+    if not ammoCharacterAddedConnection then
+
+        ammoCharacterAddedConnection = LocalPlayer.CharacterAdded:Connect(function()
+
+            task.defer(ammoHookCharacter)
+
+        end)
 
     end
 
@@ -3451,8 +3728,6 @@ RunService.Heartbeat:Connect(function(dt)
 
     applyRainbowGun()
 
-    if infiniteAmmo then forceAmmo() end
-
     if chamsEnabled then UpdateChams() end
 
 end)
@@ -3536,6 +3811,12 @@ getgenv().__Testing.Body = function()
     pcall(function()
 
         if trackerGui then trackerGui:Destroy() end
+
+    end)
+
+    pcall(function()
+
+        if restoreAmmoCapacity then restoreAmmoCapacity() end
 
     end)
 
